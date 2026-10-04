@@ -114,6 +114,7 @@ def test_decompose_rejects_bad_inputs():
         {"materials": json.dumps(["a", "a"])},
         {"materials": "not json"},
         {"mu_matrix": json.dumps([[0.1, 0.2], [0.3, -0.1]])},
+        {"mu_matrix": json.dumps([[0.1, 0.2], [0.3]])},
         {"mu_matrix": json.dumps([[1.0, 1.0], [1.0, 1.0000001]])},
         {"slice_thickness_mm": "0"},
         {"rois": json.dumps([{"name": "x", "x0": 0, "y0": 0, "x1": 999, "y1": 2}])},

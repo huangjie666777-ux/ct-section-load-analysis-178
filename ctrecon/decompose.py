@@ -36,7 +36,10 @@ def validate_mu_matrix(matrix: object) -> np.ndarray:
     condition number above MAX_CONDITION is rejected outright instead of
     being papered over with regularization.
     """
-    arr = np.asarray(matrix, dtype=np.float64)
+    try:
+        arr = np.asarray(matrix, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"mu_matrix must be a 2x2 numeric matrix: {exc}") from exc
     if arr.shape != (2, 2):
         raise ValidationError("mu_matrix must be a 2x2 matrix")
     if not np.all(np.isfinite(arr)) or np.any(arr <= 0.0):

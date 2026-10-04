@@ -131,3 +131,37 @@ NPZ 数组：
     .venv/bin/python examples/dual_material_demo.py
 
 脚本打印可直接使用的 curl 命令。
+## 复合梁截面载荷校核：POST /section_check
+
+在双能分解基础上做复合材料截面校核：由密度图求体积分数，按线弹性、完全粘结、平截面假设，联合求解轴力与双向弯矩（不忽略耦合项），逐材料统计拉/压极值与许用比。
+
+`multipart/form-data` 字段：几何参数与 `mu_matrix` 同 /decompose；另需：
+
+| 字段 | 说明 |
+| --- | --- |
+| `mask_file` | NPZ，含与重建图同尺寸的布尔数组 `mask`；掩膜外像素不参与校核 |
+| `materials` | JSON，两个对象：`{"name","reference_density_mg_per_mm3","elastic_modulus_mpa","tensile_allowable_mpa","compressive_allowable_mpa"}`，名称唯一，数值有限且严格为正 |
+| `load_cases` | JSON，1–8 个唯一命名工况：`{"name","axial_force_n","mx_nmm","my_nmm"}`，单位 N 与 N·mm，必须有限 |
+
+### 力学模型与假设范围
+
+- 体积分数 `phi_m = rho_m / rho_ref_m`；像素内两材料分数之和 > 1 时按比例归一，< 1 时保留空隙（不补满）。原密度图不做任何修改。
+- 坐标以图像中心为原点，x 向右、y 向上（数组第 0 行为 +y），取像素中心。
+- 应变 `eps = eps0 + kx*y - ky*x`；像素有效模量为 `sum(phi_m * E_m)`；材料应力 `sigma_m = E_m * eps`，仅在该材料 `phi_m > 0` 处统计。
+- 截面刚度按像素面积积分，3×3 耦合系统 `[N, Mx, My] = K [eps0, kx, ky]` 联合求解，其中 `Mx = integral(y*sigma dA)`、`My = integral(-x*sigma dA)`。
+- 每工况每材料给出最大拉应力、最大压应力及其位置（像素与毫米坐标）、拉/压许用比；控制比 ≤ 1 为合格。
+- 假设适用范围：线弹性、材料间完全粘结、平截面假设、忽略射束硬化与重建噪声对密度的影响；不适用于屈服后、脱粘或应力集中（孔边、尖角）的局部精确应力。
+
+校验（均返回 422，不返回伪结果）：非法掩膜（非布尔、尺寸不符、全空）、非有限载荷、非正材料参数、重名工况、奇异/病态截面刚度（条件数 > 1e12）。
+
+### 输出（ZIP）
+
+- `stress_<工况>_<材料>.npy`：float64 应力图（MPa），材料不存在处为 NaN。
+- `exceedance_<工况>.png`：许用比（utilization）灰度预览，仅显示用。
+- `report.json`：3×3 刚度矩阵、各工况应变/曲率、平衡残差、逐材料极值与位置、合格结论。
+
+### 解析示例（偏心双材料截面）
+
+    .venv/bin/python examples/section_check_demo.py
+
+生成低/高能 NPZ 与圆形截面掩膜，并打印可直接使用的 curl 命令（两个工况：偏心受拉+双向弯曲、过载压弯）。

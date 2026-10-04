@@ -30,15 +30,18 @@ def _parse_json_field(raw: str, name: str) -> object:
         raise ValidationError(f"field {name!r} is not valid JSON") from exc
 
 
-def dual_energy_pipeline(
+def decompose_densities(
     low_data: LoadedData,
     high_data: LoadedData,
     geometry: dict,
     materials_raw: str,
     mu_matrix_raw: str,
-    slice_thickness_mm: object,
-    rois_raw: str,
-) -> DualEnergyResult:
+) -> tuple[dict[str, np.ndarray], dict, dict[str, np.ndarray]]:
+    """Shared reconstruction + decomposition for /decompose and /section_check.
+
+    Returns (densities, params, attenuation_maps); density maps are the
+    untouched float64 outputs of the per-pixel NNLS decomposition.
+    """
     if low_data.intensity.shape != high_data.intensity.shape:
         raise ValidationError(
             "low and high energy intensity arrays must have identical shapes, "
@@ -54,8 +57,6 @@ def dual_energy_pipeline(
     )
     materials = validate_materials(_parse_json_field(materials_raw, "materials"))
     matrix = validate_mu_matrix(_parse_json_field(mu_matrix_raw, "mu_matrix"))
-    thickness = validate_slice_thickness(slice_thickness_mm)
-    rois = validate_rois(_parse_json_field(rois_raw, "rois"), clean["output_size"])
 
     maps = {}
     for label, data in (("low", low_data), ("high", high_data)):
@@ -71,24 +72,49 @@ def dual_energy_pipeline(
 
     rho1, rho2, res_low, res_high = decompose(matrix, maps["low"], maps["high"])
     densities = {materials[0]: rho1, materials[1]: rho2}
-    residuals = {"low": res_low, "high": res_high}
-    roi_results = integrate_rois(
-        rois,
-        densities,
-        residuals,
-        pixel_spacing_mm=clean["pixel_spacing_mm"],
-        slice_thickness_mm=thickness,
-    )
     params = {
         **clean,
         "materials": list(materials),
         "mu_matrix_mm2_per_mg": matrix.tolist(),
-        "slice_thickness_mm": thickness,
     }
+    attenuation = dict(maps)
+    attenuation["residual_low"] = res_low
+    attenuation["residual_high"] = res_high
+    return densities, params, attenuation
+
+
+def dual_energy_pipeline(
+    low_data: LoadedData,
+    high_data: LoadedData,
+    geometry: dict,
+    materials_raw: str,
+    mu_matrix_raw: str,
+    slice_thickness_mm: object,
+    rois_raw: str,
+) -> DualEnergyResult:
+    densities, params, attenuation = decompose_densities(
+        low_data, high_data, geometry, materials_raw, mu_matrix_raw
+    )
+    thickness = validate_slice_thickness(slice_thickness_mm)
+    rois = validate_rois(
+        _parse_json_field(rois_raw, "rois"), params["output_size"]
+    )
+    residuals = {
+        "low": attenuation.pop("residual_low"),
+        "high": attenuation.pop("residual_high"),
+    }
+    roi_results = integrate_rois(
+        rois,
+        densities,
+        residuals,
+        pixel_spacing_mm=params["pixel_spacing_mm"],
+        slice_thickness_mm=thickness,
+    )
+    params = {**params, "slice_thickness_mm": thickness}
     return DualEnergyResult(
         densities=densities,
         residuals=residuals,
-        attenuation=maps,
+        attenuation=attenuation,
         params=params,
         roi_results=roi_results,
     )

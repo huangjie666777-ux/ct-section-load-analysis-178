@@ -10,10 +10,11 @@ import numpy as np
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, Response
 
-from .dual_service import dual_energy_pipeline
-from .io_utils import ValidationError, load_npz
+from .dual_service import decompose_densities, dual_energy_pipeline
+from .io_utils import ValidationError, load_mask_npz, load_npz
 from .preview import npy_bytes, render_png
 from .reconstruct import supported_filters
+from .section_check import report_json, run_section_check, validate_section_materials
 from .service import reconstruct_upload
 
 app = FastAPI(title="Parallel-beam CT FBP reconstruction", version="1.0.0")
@@ -147,4 +148,78 @@ async def decompose(
         content=zip_buffer.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="decomposition.zip"'},
+    )
+
+
+@app.post("/section_check")
+async def section_check(
+    low_file: UploadFile = File(..., description="NPZ with low-energy intensity, dark, flat"),
+    high_file: UploadFile = File(..., description="NPZ with high-energy intensity, dark, flat"),
+    mask_file: UploadFile = File(..., description="NPZ with boolean 'mask' array, image-sized"),
+    detector_spacing_mm: float = Form(...),
+    center_index: float = Form(...),
+    output_size: int = Form(...),
+    pixel_spacing_mm: float = Form(...),
+    filter: str = Form("ram-lak"),
+    materials: str = Form(..., description="JSON list of two material objects with mechanical data"),
+    mu_matrix: str = Form(..., description="JSON 2x2 mass attenuation matrix, mm^2/mg"),
+    load_cases: str = Form(..., description="JSON list of 1-8 load cases with N, Mx, My"),
+) -> Response:
+    low_data = load_npz(await low_file.read())
+    high_data = load_npz(await high_file.read())
+    try:
+        materials_spec = json.loads(materials)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("field 'materials' is not valid JSON") from exc
+    try:
+        load_cases_spec = json.loads(load_cases)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("field 'load_cases' is not valid JSON") from exc
+    material_specs = validate_section_materials(materials_spec)
+
+    geometry = {
+        "detector_spacing_mm": detector_spacing_mm,
+        "center_index": center_index,
+        "output_size": output_size,
+        "pixel_spacing_mm": pixel_spacing_mm,
+        "filter": filter,
+    }
+    densities, params, _ = decompose_densities(
+        low_data,
+        high_data,
+        geometry,
+        json.dumps([m.name for m in material_specs]),
+        mu_matrix,
+    )
+    mask = load_mask_npz(await mask_file.read(), (params["output_size"],) * 2)
+
+    result = run_section_check(
+        densities,
+        mask,
+        pixel_spacing_mm=params["pixel_spacing_mm"],
+        materials_raw=materials_spec,
+        load_cases_raw=load_cases_spec,
+    )
+
+    report = report_json(result)
+    report["parameters"] = params
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for case in result.load_cases:
+            for material in result.materials:
+                zf.writestr(
+                    f"stress_{case.name}_{material.name}.npy",
+                    npy_bytes(result.stress_maps[case.name][material.name]),
+                )
+            zf.writestr(
+                f"exceedance_{case.name}.png",
+                render_png(result.utilization_maps[case.name]),
+            )
+        zf.writestr("report.json", json.dumps(report, indent=2, sort_keys=True))
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="section_check.zip"'},
     )

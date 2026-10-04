@@ -96,6 +96,40 @@ def load_npz(payload: bytes) -> LoadedData:
     return LoadedData(intensity=intensity, dark=dark, flat=flat)
 
 
+def load_mask_npz(payload: bytes, expected_shape: tuple[int, int]) -> np.ndarray:
+    """Load a boolean section mask NPZ ('mask' array) matching the image shape."""
+    if not zipfile.is_zipfile(io.BytesIO(payload)):
+        raise ValidationError("uploaded mask file is not a valid NPZ/ZIP archive")
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+        total = sum(info.file_size for info in zf.infolist())
+        if total > MAX_UNCOMPRESSED_BYTES:
+            raise ValidationError(
+                f"uncompressed mask payload {total} bytes exceeds limit "
+                f"{MAX_UNCOMPRESSED_BYTES} bytes"
+            )
+
+    try:
+        with np.load(io.BytesIO(payload), allow_pickle=False) as archive:
+            if "mask" not in archive.files:
+                raise ValidationError("mask NPZ is missing required array 'mask'")
+            mask = archive["mask"]
+    except zipfile.BadZipFile as exc:
+        raise ValidationError("uploaded mask file is not a valid NPZ archive") from exc
+    except ValueError as exc:
+        raise ValidationError(f"invalid mask NPZ contents: {exc}") from exc
+
+    if mask.dtype != np.bool_:
+        raise ValidationError(f"'mask' must be a boolean array, got dtype {mask.dtype}")
+    if mask.shape != expected_shape:
+        raise ValidationError(
+            f"'mask' must have shape {expected_shape}, got {mask.shape}"
+        )
+    if not np.any(mask):
+        raise ValidationError("section mask selects no pixels")
+    return np.ascontiguousarray(mask)
+
+
 def validate_params(
     detector_spacing: float,
     center_index: float,
